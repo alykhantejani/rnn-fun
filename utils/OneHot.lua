@@ -11,11 +11,6 @@ function OneHot:__init(outputSize)
 end
 
 function OneHot:updateOutput(input)
-  if self._eye then 
-    print ('eye exists and has size ' .. tostring(self._eye:size()))
-  else
-    print('eye does not exist')
-  end
   self.output:resize(input:size(1), self.outputSize):zero()
   if self._eye == nil then self._eye = torch.eye(self.outputSize) end
   self._eye = self._eye:float()

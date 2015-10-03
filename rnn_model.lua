@@ -1,5 +1,5 @@
 require 'nngraph'
-require 'util.OneHot'
+require 'utils.OneHot'
 
 --Just a single layer RNN for the time being
 --TODO: Expand this to multi layer and add dropout
