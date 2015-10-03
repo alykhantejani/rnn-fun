@@ -5,6 +5,7 @@ require 'rnn_model'
 require 'optim'
 local minibatch_loader = require 'utils.CharSplitLMMinibatchLoader'
 local model_utils = require 'utils.model_utils'
+local path = require 'pl.path'
 
 -------------------------------------------------------------------
 ----------------------Command Line Params--------------------------
@@ -14,25 +15,27 @@ cmd:text()
 cmd:text('Arguments')
 cmd:argument('-data_dir','txt file with data')
 cmd:text('Options')
-cmd:option('-grad_clip',5,'clip gradients at this value')
 cmd:option('-train_frac',0.95,'fraction of data that goes into train set')
 cmd:option('-val_frac',0.05,'fraction of data that goes into validation set')
 cmd:option('-batch_size', 64, 'batch size')
 cmd:option('-max_epoch', 10, 'max epochs to train for')
 cmd:option('-sequence_length', 10, 'sequence length to train on')
 cmd:option('-num_hidden_units', 128, 'number of hidden units')
+cmd:option('-display_iteration', 20, 'when to display training accuracy (1 iteration = 1 batch)')
+cmd:option('-test_iteration', 20, 'when to display validation accuracy (1 iteration = 1 batch')
+-------------------Optimization----------------------------------
 cmd:option('-learning_rate',2e-3,'learning rate')
 cmd:option('-learning_rate_decay',0.97,'learning rate decay')
 cmd:option('-learning_rate_decay_after',10,'in number of epochs, when to start decaying the learning rate')
 cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
-cmd:option('-weights', '', 'pretrained model to begin training from')
-cmd:option('-display_iteration', 20, 'when to display training accuracy (1 iteration = 1 batch)')
-cmd:option('-test_iteration', 20, 'when to display validation accuracy (1 iteration = 1 batch')
-cmd:option('-optim_state','','path to the optimiser state file')
+-------------------------Snapshotting--------------------------------
+cmd:option('-snapshot', '', 'snapshot to begin training from')
 cmd:option('-snapshot_dir', './snapshots/', 'snapshot directory')
-cmd:option('-snapshot_iteration', 1, 'snapshot after how many epochs?')
+cmd:option('-snapshot_epoch', 1, 'snapshot after how many epochs?')
+----------------------------Misc------------------------------------
 cmd:option('-gpu_id', -1, 'gpu ID to train on')
 cmd:option('-log', '', 'output log file')
+cmd:option('-grad_clip',5,'clip gradients at this value')
 
 local params = cmd:parse(arg)
 
@@ -52,20 +55,72 @@ local num_hidden_units = params.num_hidden_units
 local display_iteration = params.display_iteration
 local test_frac = math.max(0, 1 - (params.train_frac + params.val_frac))
 local split_sizes = {params.train_frac, params.val_frac, test_frac} 
+local resume_from_snapshot = (params.snapshot ~= '')
+
+
+if not path.exists(params.snapshot_dir) then
+	print('creating snapshot directory ' .. params.snapshot_dir)
+	path.mkdir(params.snapshot_dir)
+end
+
 
 local loader = minibatch_loader.create(params.data_dir, batch_size, seq_length, split_sizes)
 local vocab_size = loader.vocab_size
 local vocab = loader.vocab
-
 print('loaded dataset with ' .. vocab_size .. ' unique characters')
 
 --input_vocab_size, rnn_hidden_size, output_vocab_size
 local model = create_rnn(vocab_size, num_hidden_units, vocab_size)
 local criterion = nn.ClassNLLCriterion()
 
+if resume_from_snapshot then
+	print('loading model and loader from snapshot ' .. params.snapshot)
+	local snapshot = torch.load(params.snapshot)
+	loader = snapshot.loader
+	model = snapshot.model
+end
+
+
 local cloned_models = model_utils.clone_many_times(model, seq_length)
 local cloned_criteria = model_utils.clone_many_times(criterion, seq_length)
 
+function evaluate_validation_set(max_batches)
+	local num_batches = loader.split_sizes[2] -- validation set
+	if max_batches then 
+		max_batches = math.min(max_batches,  num_batches)
+	else
+		max_batches = num_batches
+	end
+
+	loader:reset_batch_pointer(2) -- move batch iteration pointer for this split to front	
+
+	local hidden_states = {}
+	hidden_states[0] = torch.zeros(batch_size, num_hidden_units)
+	
+	local predictions = {}
+	local loss = 0
+
+	for i = 1, max_batches do
+		local input, target = loader:next_batch(2)
+		for t = 1, seq_length do
+			cloned_models[t]:evaluate()
+			local result = cloned_models[t]:forward({input[{{}, t}], hidden_states[t-1]})
+			predictions[t] = result[2] -- log softmax output
+			local next_hidden = result[1] --hidden output
+			hidden_states[t] = next_hidden
+			loss = loss + cloned_criteria[t]:forward(predictions[t], target[{{}, t}])
+		end
+		loss = loss / seq_length
+		hidden_states[0] = hidden_states[#hidden_states] -- carry over hidden state
+	end
+	loss = loss / max_batches
+
+	return loss
+end
+
+-------------------------------------------------------------------------
+---------------------------Main loop-------------------------------------
+-------------------------------------------------------------------------
 -- put the above things into one flattened parameters tensor
 params, grad_params = model_utils.combine_all_parameters(unpack(cloned_models))
 
@@ -78,19 +133,19 @@ function feval(x)
 	grad_params:zero()
 
 	------------get minibatch----------------
-	local input, target = loader:next_batch(1)
+	local input, target = loader:next_batch(1) -- training_batch
 
 	local hidden_states = {}
-	hidden_states[0] = torch.zeros(batch_size, num_hidden_units)
+	hidden_states[0] = h_init
 	
 	local predictions = {}
 	local loss = 0
 	
 	-----------Forward Pass-------------------
 	for t=1,seq_length do
-		result = cloned_models[t]:forward{input[{{},t}], hidden_states[t-1]} -- feed forward the tth character for a whole batch
+		local result = cloned_models[t]:forward{input[{{},t}], hidden_states[t-1]} -- feed forward the tth character for a whole batch
 		predictions[t] = result[2] -- log softmax output
-		next_hidden = result[1] --hidden output
+		local next_hidden = result[1] --hidden output
 		hidden_states[t] = next_hidden
 		loss = loss + cloned_criteria[t]:forward(predictions[t], target[{{}, t}])
 	end
@@ -116,20 +171,72 @@ function feval(x)
 	return loss, grad_params
 end
 
--------------------------------------------------------------------------
----------------------------Main loop-------------------------------------
--------------------------------------------------------------------------
-local optim_state = {learningRate = params.learning_rate, alpha = params.decay_rate}
-local timer = torch.Timer()
+function train()
+	local optim_state = {learningRate = params.learning_rate, alpha = params.decay_rate}
+	local timer = torch.Timer()
+	local iterations_per_epoch = loader.ntrain
 
-for epoch = 1, max_epochs do
-	print(string.format('Starting Epoch [%d]', epoch))
-	for iter = 1, loader.ntrain do
-		timer:reset()
-		p, cost = optim.rmsprop(feval, params, optim_state)
-		loss = cost[1]
-		if (iter % display_iteration) == 0 then
-			print(string.format('Epoch [%d] Iteration [%d]: Loss = %.4f (this batch took %.4f ms)', epoch, iter, loss, (timer:time().real * 1000.0)))
+	local train_losses = {}
+	local val_losses = {}
+
+	local start_epoch = 1
+
+	if resume_from_snapshot then
+		print('resuming training from snapshot ' .. params.snapshot)
+		local snapshot = torch.load(params.snapshot)
+		train_losses = snapshot.train_losses
+		val_losses = snapshot.val_losses
+		start_epoch = snapshot.epoch + 1
+		optim_state = snapshot.optim_state
+	end
+
+	for epoch = start_epoch, max_epochs do
+
+		print(string.format('Starting Epoch [%d]', epoch))
+		for iter = 1, iterations_per_epoch do
+			
+			for t = 1, #cloned_models do
+				cloned_models[t]:training()
+			end
+
+			timer:reset()
+			p, cost = optim.rmsprop(feval, params, optim_state)
+			loss = cost[1]
+
+			train_losses[(iterations_per_epoch * (epoch - 1)) + iter] = loss
+
+			if (iter % display_iteration) == 0 then
+				print(string.format('Epoch [%d] Iteration [%d/%d]: Loss = %.4f (this batch took %.4f ms)', epoch, iter, iterations_per_epoch, loss, (timer:time().real * 1000.0)))
+			end
+			if (iter % validation_iteration) then
+				print('running validation set...')
+				val_loss = evaluate_network()
+				val_losses[(iterations_per_epoch * (epoch - 1)) + iter] = val_loss
+				print('validation loss is ' .. val_loss)
+			end
 		end
+		-- exponential learning rate decay
+	    if params.learning_rate_decay < 1 then
+	        if epoch >= params.learning_rate_decay_after then
+	            local decay_factor = params.learning_rate_decay
+	            optim_state.learningRate = optim_state.learningRate * decay_factor -- decay it
+	            print('decayed learning rate by a factor ' .. decay_factor .. ' to ' .. optim_state.learningRate)
+	        end
+	    end
+	    ---------------------------------------------
+
+	    --Snapshot-----------------------------------
+	    if epoch % params.snapshot_epoch == 0 then
+	    	local out_path = path.join(params.snapshot_dir, 'snapshot_epoch' .. epoch .. '.t7')
+	    	local snapshot = {}
+	    	snapshot.model = protos
+	    	snapshot.optim_state = optim_state
+        	snapshot.train_losses = train_losses
+        	snapshot.val_losses = val_losses
+        	snapshot.epoch = epoch
+        	snapshot.loader = loader
+        	torch.save(out_path, snapshot)
+	    end
+	    ------------------------------------------------
 	end
 end
