@@ -36,6 +36,7 @@ cmd:option('-snapshot_epoch', 1, 'snapshot after how many epochs?')
 cmd:option('-gpu_id', -1, 'gpu ID to train on')
 cmd:option('-log', '', 'output log file')
 cmd:option('-grad_clip',5,'clip gradients at this value')
+cmd:option('-seed',123,'torch manual random number generator seed')
 
 local params = cmd:parse(arg)
 
@@ -43,6 +44,7 @@ if params.log ~= '' then
 	cmd:log(params.log, params)
 end
 
+torch.manualSeed(params.seed)
 -------------------------------------------------------------------
 ----------------------Initialize Variables-------------------------
 -------------------------------------------------------------------
@@ -81,6 +83,7 @@ local gpu = gpu_id ~= -1
 if gpu then
 	require 'cutorch'
 	require 'cunn'
+	cutorch.manualSeed(params.seed)
 end
 
 local model = create_rnn(vocab_size, num_hidden_units, vocab_size)
@@ -98,8 +101,18 @@ if gpu then
 	criterion = criterion:cuda()
 end
 
+
 local cloned_models = model_utils.clone_many_times(model, seq_length)
 local cloned_criteria = model_utils.clone_many_times(criterion, seq_length)
+-- put the above things into one flattened parameters tensor
+params, grad_params = model_utils.combine_all_parameters(unpack(cloned_models))
+params:uniform(-0.08, 0.08) --random initialization
+print('number of parameters in the model: ' .. params:nElement())
+
+local h_init = torch.zeros(batch_size, num_hidden_units)
+if gpu then
+	h_init = h_init:cuda()
+end
 
 function evaluate_validation_set(max_batches)
 	local num_batches = loader.split_sizes[2] -- validation set
@@ -113,15 +126,17 @@ function evaluate_validation_set(max_batches)
 
 	local hidden_states = {}
 	hidden_states[0] = torch.zeros(batch_size, num_hidden_units)
-	
+	if gpu then 
+		hidden_states[0] = hidden_states[0]:cuda()
+	end
 	local predictions = {}
 	local loss = 0
 
 	for i = 1, max_batches do
 		local input, target = loader:next_batch(2)
 		if gpu then 
-			input = input:cuda()
-			target = target:cuda()
+			input = input:float():cuda()
+			target = target:float():cuda()
 		end
 		for t = 1, seq_length do
 			cloned_models[t]:evaluate()
@@ -135,20 +150,12 @@ function evaluate_validation_set(max_batches)
 		hidden_states[0] = hidden_states[#hidden_states] -- carry over hidden state
 	end
 	loss = loss / max_batches
-
 	return loss
 end
 
 -------------------------------------------------------------------------
 ---------------------------Main loop-------------------------------------
 -------------------------------------------------------------------------
--- put the above things into one flattened parameters tensor
-params, grad_params = model_utils.combine_all_parameters(unpack(cloned_models))
-
-local h_init = torch.zeros(batch_size, num_hidden_units)
-if gpu then
-	h_init = h_init:cuda()
-end
 
 function feval(x)
 	if x ~= params then
@@ -176,9 +183,9 @@ function feval(x)
 		predictions[t] = result[2] -- log softmax output
 		local next_hidden = result[1] --hidden output
 		hidden_states[t] = next_hidden
-		loss = loss + cloned_criteria[t]:forward(predictions[t], target[{{}, t}])
+		err = cloned_criteria[t]:forward(predictions[t], target[{{}, t}])
+		loss = loss + err
 	end
-
 	loss = loss / seq_length
 
 	-------------Backward Pass-----------------
@@ -203,6 +210,7 @@ end
 function train()
 	local optim_state = {learningRate = learning_rate, alpha = decay_rate}
 	local timer = torch.Timer()
+
 	local iterations_per_epoch = loader.ntrain
 
 	local train_losses = {}
@@ -221,8 +229,8 @@ function train()
 
 	for epoch = start_epoch, max_epochs do
 		print(string.format('Starting Epoch [%d]', epoch))
+
 		for iter = 1, iterations_per_epoch do
-			
 			for t = 1, #cloned_models do
 				cloned_models[t]:training()
 			end
@@ -234,10 +242,10 @@ function train()
 			train_losses[(iterations_per_epoch * (epoch - 1)) + iter] = loss
 
 			if (iter % display_iteration) == 0 then
-				print(string.format('Epoch [%d] Iteration [%d/%d]: Loss = %.4f (this batch took %.4f ms)', epoch, iter, iterations_per_epoch, loss, (timer:time().real * 1000.0)))
+				print(string.format('Epoch [%d] Iteration [%d/%d]: Loss = %6.8f (this batch took %.4f ms)', epoch, iter, iterations_per_epoch, loss, (timer:time().real * 1000.0)))
 			end
 			if (iter % validation_iteration) == 0 then
-				val_loss = evaluate_validation_set()
+				local val_loss = evaluate_validation_set()
 				val_losses[(iterations_per_epoch * (epoch - 1)) + iter] = val_loss
 				print(string.format('[Validation Summary] Iteration [%d]: %.4f', iter, val_loss))
 			end
@@ -254,15 +262,14 @@ function train()
 
 	    --Snapshot-----------------------------------
 	    if epoch % snapshot_epoch == 0 then
-	    	local out_path = path.join(snapshot_dir, 'snapshot_epoch' .. epoch .. '.t7')
-	    	local snapshot = {}
-	    	snapshot.model = protos
-	    	snapshot.optim_state = optim_state
-        	snapshot.train_losses = train_losses
-        	snapshot.val_losses = val_losses
-        	snapshot.epoch = epoch
-        	snapshot.loader = loader
-        	torch.save(out_path, snapshot)
+			local out_path = path.join(snapshot_dir, 'snapshot_epoch' .. epoch .. '.t7')
+			local snapshot = {}
+			snapshot.model = model
+			snapshot.optim_state = optim_state
+			snapshot.train_losses = train_losses
+			snapshot.val_losses = val_losses
+			snapshot.epoch = epoch
+			torch.save(out_path, snapshot)
 	    end
 	    ------------------------------------------------
 	end
