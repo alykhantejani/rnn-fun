@@ -204,7 +204,7 @@ function feval(x)
 	-------------------------------------------
 
 	h_init = hidden_states[#hidden_states] -- update next batch initial state
-	--grad_params:div(seq_length)
+	grad_params:div(seq_length)
 	grad_params:clamp(-clip, clip) -- clamp to avoid exploding gradients
 
 	return loss, grad_params
