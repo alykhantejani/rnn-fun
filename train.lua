@@ -38,6 +38,7 @@ cmd:option('-log', '', 'output log file')
 cmd:option('-grad_clip',5,'clip gradients at this value')
 cmd:option('-seed',123,'torch manual random number generator seed')
 
+
 local params = cmd:parse(arg)
 
 if params.log ~= '' then
@@ -45,6 +46,7 @@ if params.log ~= '' then
 end
 
 torch.manualSeed(params.seed)
+
 -------------------------------------------------------------------
 ----------------------Initialize Variables-------------------------
 -------------------------------------------------------------------
@@ -101,7 +103,6 @@ if gpu then
 	criterion = criterion:cuda()
 end
 
-
 local cloned_models = model_utils.clone_many_times(model, seq_length)
 local cloned_criteria = model_utils.clone_many_times(criterion, seq_length)
 -- put the above things into one flattened parameters tensor
@@ -126,9 +127,11 @@ function evaluate_validation_set(max_batches)
 
 	local hidden_states = {}
 	hidden_states[0] = torch.zeros(batch_size, num_hidden_units)
+
 	if gpu then 
 		hidden_states[0] = hidden_states[0]:cuda()
 	end
+
 	local predictions = {}
 	local loss = 0
 
@@ -150,13 +153,13 @@ function evaluate_validation_set(max_batches)
 		hidden_states[0] = hidden_states[#hidden_states] -- carry over hidden state
 	end
 	loss = loss / max_batches
+
 	return loss
 end
 
 -------------------------------------------------------------------------
 ---------------------------Main loop-------------------------------------
 -------------------------------------------------------------------------
-
 function feval(x)
 	if x ~= params then
 		params:copy(x)
@@ -201,7 +204,7 @@ function feval(x)
 	-------------------------------------------
 
 	h_init = hidden_states[#hidden_states] -- update next batch initial state
-	grad_params:div(seq_length)
+	--grad_params:div(seq_length)
 	grad_params:clamp(-clip, clip) -- clamp to avoid exploding gradients
 
 	return loss, grad_params
@@ -246,6 +249,7 @@ function train()
 			end
 			if (iter % validation_iteration) == 0 then
 				local val_loss = evaluate_validation_set()
+
 				val_losses[(iterations_per_epoch * (epoch - 1)) + iter] = val_loss
 				print(string.format('[Validation Summary] Iteration [%d]: %.4f', iter, val_loss))
 			end
