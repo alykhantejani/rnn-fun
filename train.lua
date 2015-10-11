@@ -204,7 +204,7 @@ function feval(x)
 	-------------------------------------------
 
 	h_init = hidden_states[#hidden_states] -- update next batch initial state
-	grad_params:div(seq_length)
+	--grad_params:div(seq_length)
 	grad_params:clamp(-clip, clip) -- clamp to avoid exploding gradients
 
 	return loss, grad_params
@@ -254,6 +254,7 @@ function train()
 				print(string.format('[Validation Summary] Iteration [%d]: %.4f', iter, val_loss))
 			end
 		end
+		
 		-- exponential learning rate decay
 	    if learning_rate_decay < 1 then
 	        if epoch >= learning_rate_decay_after then
@@ -268,10 +269,12 @@ function train()
 	    if epoch % snapshot_epoch == 0 then
 			local out_path = path.join(snapshot_dir, 'snapshot_epoch' .. epoch .. '.t7')
 			local snapshot = {}
-			snapshot.model = model
+			snapshot.model = cloned_models[1]
+			snapshot.input_hidden_size = num_hidden_units
 			snapshot.optim_state = optim_state
 			snapshot.train_losses = train_losses
 			snapshot.val_losses = val_losses
+			snapshot.vocab_mapping = loader.vocab_mapping
 			snapshot.epoch = epoch
 			torch.save(out_path, snapshot)
 	    end
