@@ -92,10 +92,15 @@ local model = create_rnn(vocab_size, num_hidden_units, vocab_size)
 local criterion = nn.ClassNLLCriterion()
 
 if resume_from_snapshot then
-	print('loading model and loader from snapshot ' .. params.snapshot)
+	print('loading snapshot from file' .. params.snapshot)
 	local snapshot = torch.load(params.snapshot)
-	loader = snapshot.loader
 	model = snapshot.model
+	for char, idx in pairs(snapshot.vocab_mapping) do
+		if loader.vocab_mapping[char] ~= idx then
+			print(string.format('ERROR: and char %s does not have the same index in the loader (%d) and snapshot (%d)', char, loader.vocab_mapping[char], idx))
+			exit(1)
+		end
+	end
 end
 
 if gpu then
@@ -105,10 +110,10 @@ end
 
 local cloned_models = model_utils.clone_many_times(model, seq_length)
 local cloned_criteria = model_utils.clone_many_times(criterion, seq_length)
+
 -- put the above things into one flattened parameters tensor
 params, grad_params = model_utils.combine_all_parameters(unpack(cloned_models))
 params:uniform(-0.08, 0.08) --random initialization
-print('number of parameters in the model: ' .. params:nElement())
 
 local h_init = torch.zeros(batch_size, num_hidden_units)
 if gpu then
@@ -157,6 +162,7 @@ function evaluate_validation_set(max_batches)
 	return loss
 end
 
+
 -------------------------------------------------------------------------
 ---------------------------Main loop-------------------------------------
 -------------------------------------------------------------------------
@@ -204,7 +210,7 @@ function feval(x)
 	-------------------------------------------
 
 	h_init = hidden_states[#hidden_states] -- update next batch initial state
-	--grad_params:div(seq_length)
+	grad_params:div(seq_length)
 	grad_params:clamp(-clip, clip) -- clamp to avoid exploding gradients
 
 	return loss, grad_params
@@ -276,6 +282,8 @@ function train()
 			snapshot.val_losses = val_losses
 			snapshot.vocab_mapping = loader.vocab_mapping
 			snapshot.epoch = epoch
+
+			print(string.format('saving snapshot to location %s', out_path))
 			torch.save(out_path, snapshot)
 	    end
 	    ------------------------------------------------
