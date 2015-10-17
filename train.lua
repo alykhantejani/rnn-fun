@@ -62,7 +62,7 @@ local decay_rate = params.decay_rate
 local learning_rate_decay = params.learning_rate_decay
 local learning_rate_decay_after = params.learning_rate_decay_after
 ------------Snapshots-------------------------------------------
-local snapshot = params.snapshot
+local snapshot_file = params.snapshot
 local snapshot_dir = params.snapshot_dir
 local snapshot_epoch = params.snapshot_epoch
 if not path.exists(params.snapshot_dir) then
@@ -92,8 +92,8 @@ local model = create_rnn(vocab_size, num_hidden_units, vocab_size)
 local criterion = nn.ClassNLLCriterion()
 
 if resume_from_snapshot then
-	print('loading snapshot from file' .. params.snapshot)
-	local snapshot = torch.load(params.snapshot)
+	print(string.format('loading snapshot from file', snapshot_file))
+	local snapshot = torch.load(snapshot_file)
 	model = snapshot.model
 	for char, idx in pairs(snapshot.vocab_mapping) do
 		if loader.vocab_mapping[char] ~= idx then
@@ -224,6 +224,9 @@ function train()
 
 	local train_losses = {}
 	local val_losses = {}
+
+	local max_iterations = max_epochs * loader.ntrain
+	local start_iteration = 1
 
 	local start_epoch = 1
 
