@@ -113,6 +113,8 @@ print('number of parameters in the model: ' .. params:nElement())
 local h_init = torch.zeros(batch_size, num_hidden_units)
 if gpu then
 	h_init = h_init:cuda()
+	params = params:cuda()
+	grad_params = grad_params:cuda()
 end
 
 function evaluate_validation_set(max_batches)
@@ -195,7 +197,9 @@ function feval(x)
 	--make error at time t 0 as there is no influence from the future
 	local dhidden = {}
 	dhidden[seq_length] = torch.zeros(batch_size, num_hidden_units) -- no error from the futuer hidden node
-
+	if gpu then
+		dhidden[seq_length] = dhidden[seq_length]:cuda()
+	end
 	for t = seq_length,1,-1 do
 		local dcrit = cloned_criteria[t]:backward(predictions[t], target[{{}, t}])
 		local dmodel = cloned_models[t]:backward({input[{{}, t}], hidden_states[t-1]},{dhidden[t], dcrit})
