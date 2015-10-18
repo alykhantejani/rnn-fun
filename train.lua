@@ -232,7 +232,7 @@ function train()
 
 	if resume_from_snapshot then
 		print('resuming training from snapshot ' .. snapshot)
-		local snapshot = torch.load(snapshot)
+		local snapshot = torch.load(snapshot_file)
 		train_losses = snapshot.train_losses
 		val_losses = snapshot.val_losses
 		start_epoch = snapshot.epoch + 1
